@@ -1,7 +1,7 @@
 import os
 import json
 import streamlit as st
-from openai import OpenAI
+import google.generativeai as genai
 
 # ============ 基本配置 ============
 
@@ -23,54 +23,64 @@ st.markdown(
 """
 )
 
-# ============ OpenAI Client 工具函数 ============
+# ============ Google Gemini 配置工具函数 ============
 
-def get_openai_client(user_api_key: str):
+# 将侧边栏的模型选项映射到 Gemini 的真实模型名
+MODEL_MAP = {
+    "gpt-4.1-mini": "gemini-1.5-flash",
+    "gpt-4.1": "gemini-1.5-pro",
+}
+
+
+def configure_gemini(user_api_key: str):
     """
     优先使用用户在前端输入的 API Key。
     如未输入，可选择性地回退到环境变量/Streamlit secrets（方便你自己调试）。
+
+    使用 GOOGLE_API_KEY 这个名字，避免和你之前的 OpenAI Key 混淆。
     """
     api_key = None
 
     if user_api_key and user_api_key.strip():
         api_key = user_api_key.strip()
     else:
-        # 如果你完全不想有回退，可以把下面这两段删掉
-        if "OPENAI_API_KEY" in st.secrets:
-            api_key = st.secrets["OPENAI_API_KEY"]
+        # 你如果不想有任何回退，可以把下面这两段删掉
+        if "GOOGLE_API_KEY" in st.secrets:
+            api_key = st.secrets["GOOGLE_API_KEY"]
         if not api_key:
-            api_key = os.getenv("OPENAI_API_KEY")
+            api_key = os.getenv("GOOGLE_API_KEY")
 
     if not api_key:
         st.error(
-            "未检测到 OpenAI API Key。\n\n"
-            "请在左侧输入你的 OpenAI API Key。"
+            "未检测到 Google Gemini API Key。\n\n"
+            "请在左侧输入你的 Gemini API Key，或在环境变量/Secrets 中设置 GOOGLE_API_KEY。"
         )
         st.stop()
 
-    client = OpenAI(api_key=api_key)
-    return client
+    # 配置全局 Gemini
+    genai.configure(api_key=api_key)
 
 
 # ============ 侧边栏设置 ============
 
 with st.sidebar:
-    st.header("🔑 OpenAI 设置")
+    st.header("🔑 Google Gemini 设置")
 
-    # 前端输入 API Key
+    # 前端输入 Google API Key
     user_api_key = st.text_input(
-        "OpenAI API Key",
+        "Gemini API Key",
         type="password",
         help="你的密钥只在本次会话中使用，不会被写死到代码里。",
     )
 
     st.header("⚙ 模型与风格")
 
+    # 这里的选项名字保持不变，内部会映射到 Gemini 模型
     model = st.selectbox(
-        "选择模型",
+        "选择模型（内部映射到 Gemini）",
         options=["gpt-4.1-mini", "gpt-4.1"],
         index=0,
-        help="gpt-4.1-mini：便宜、够用；gpt-4.1：更强但更贵。",
+        help="gpt-4.1-mini → gemini-1.5-flash；gpt-4.1 → gemini-1.5-pro。",
     )
 
     temperature = st.slider(
@@ -221,15 +231,16 @@ def build_user_prompt(
     return prompt.strip()
 
 
-# ============ 调用 OpenAI 并展示结果 ============
+# ============ 调用 Gemini 并展示结果 ============
 
 if run_button:
     if not raw_text.strip():
         st.warning("请先在上方粘贴要处理的小说文本。")
     else:
-        client = get_openai_client(user_api_key)
+        # 配置 Gemini（使用前端输入的 API Key 或环境变量）
+        configure_gemini(user_api_key)
 
-        with st.spinner("正在分析与润色文本……"):
+        with st.spinner("正在使用 Google Gemini 分析与润色文本……"):
 
             user_prompt = build_user_prompt(
                 text=raw_text,
@@ -240,37 +251,33 @@ if run_button:
                 target_use=target_use,
             )
 
+            # 将侧边栏选项映射为真正的 Gemini 模型名
+            gemini_model_name = MODEL_MAP.get(model, "gemini-1.5-flash")
+            gemini_model = genai.GenerativeModel(gemini_model_name)
+
             try:
-                # 去掉 response_format 参数，完全靠 prompt 约束返回 JSON
-                response = client.responses.create(
-                    model=model,
-                    input=[
-                        {
-                            "role": "system",
-                            "content": (
-                                "你是一名经验丰富的中文小说编辑和写作教练，"
-                                "擅长帮助作者对稿件进行去AI化、人性化润色，并指出逻辑与设定问题。"
-                            ),
-                        },
-                        {
-                            "role": "user",
-                            "content": user_prompt,
-                        },
+                # 使用 JSON 模式，更容易解析
+                response = gemini_model.generate_content(
+                    [
+                        "你是一名经验丰富的中文小说编辑和写作教练，"
+                        "擅长帮助作者对稿件进行去AI化、人性化润色，并指出逻辑与设定问题。",
+                        user_prompt,
                     ],
-                    temperature=temperature,
+                    generation_config={
+                        "temperature": float(temperature),
+                        "max_output_tokens": 8192,
+                        "response_mime_type": "application/json",
+                    },
                 )
 
-                # 从 Responses API 中取出文本结果
-                raw_output = response.output[0].content[0].text
-
-                # 解析 JSON
+                raw_output = response.text  # 预期为 JSON 字符串
                 data = json.loads(raw_output)
 
             except json.JSONDecodeError:
                 st.error("模型返回的内容不是合法 JSON，原始输出如下（方便你排查）：")
                 st.code(raw_output)
             except Exception as e:
-                st.error(f"调用模型或解析结果时出错：{e}")
+                st.error(f"调用 Gemini 模型或解析结果时出错：{e}")
             else:
                 edited_text = data.get("edited_text", "").strip()
                 ai_issues = data.get("ai_style_issues", [])
@@ -279,7 +286,7 @@ if run_button:
 
                 st.markdown("---")
                 st.subheader("✅ 编辑后文本（可再自行微调）")
-                
+
                 # 显示润色后文本
                 edited_area = st.text_area(
                     "编辑后文本",
