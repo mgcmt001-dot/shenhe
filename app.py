@@ -23,98 +23,137 @@ st.markdown(
 """
 )
 
-# ============ Google Gemini 配置工具函数 ============
+# ============ 辅助函数：API Key & 模型检测 ============
 
-# 为不同“档位”准备候选模型列表：会按顺序依次尝试
-MODEL_CANDIDATES = {
-    # “轻量档”：先试 1.5-flash，不行就试 gemini-pro，再不行试 text-bison-001
-    "gpt-4.1-mini": [
-        "gemini-1.5-flash",
-        "gemini-pro",
-        "text-bison-001",
-    ],
-    # “强力档”：先试 1.5-pro，不行再降级
-    "gpt-4.1": [
-        "gemini-1.5-pro",
-        "gemini-pro",
-        "text-bison-001",
-    ],
-}
+def resolve_api_key(user_api_key: str) -> str | None:
+    """
+    解析当前可用的 API Key：
+    1. 前端输入的 user_api_key 优先；
+    2. 然后是 st.secrets["GOOGLE_API_KEY"]；
+    3. 然后是环境变量 GOOGLE_API_KEY；
+    4. 都没有则返回 None。
+    """
+    if user_api_key and user_api_key.strip():
+        return user_api_key.strip()
+    if "GOOGLE_API_KEY" in st.secrets:
+        return st.secrets["GOOGLE_API_KEY"]
+    env_key = os.getenv("GOOGLE_API_KEY")
+    if env_key:
+        return env_key
+    return None
 
 
 def configure_gemini(user_api_key: str):
     """
-    优先使用用户在前端输入的 API Key。
-    如未输入，可选择性地回退到环境变量/Streamlit secrets（方便你自己调试）。
-
-    使用 GOOGLE_API_KEY 这个名字，避免和你之前的 OpenAI Key 混淆。
+    真正要调用模型前使用，确保一定拿到一个有效 API Key，否则 st.stop()。
     """
-    api_key = None
-
-    if user_api_key and user_api_key.strip():
-        api_key = user_api_key.strip()
-    else:
-        # 你如果不想有任何回退，可以把下面这两段删掉
-        if "GOOGLE_API_KEY" in st.secrets:
-            api_key = st.secrets["GOOGLE_API_KEY"]
-        if not api_key:
-            api_key = os.getenv("GOOGLE_API_KEY")
-
+    api_key = resolve_api_key(user_api_key)
     if not api_key:
         st.error(
             "未检测到 Google Gemini API Key。\n\n"
             "请在左侧输入你的 Gemini API Key，或在环境变量/Secrets 中设置 GOOGLE_API_KEY。"
         )
         st.stop()
-
-    # 配置全局 Gemini
     genai.configure(api_key=api_key)
 
 
-def generate_with_fallback(prompt: str, temperature: float, candidate_models):
+@st.cache_data(show_spinner=False)
+def get_available_text_models(api_key: str):
     """
-    依次尝试一组候选模型：
-    - 某个模型如果报 404 / not found，就自动换下一个；
-    - 一旦有一个成功，就返回 (raw_output, 使用的模型名)；
-    - 如果全部失败，则抛出最后一次的异常。
+    使用给定 api_key 调用 list_models，筛选出：
+    - 支持 generateContent 的模型；
+    - 排除 embedding / vision 等非文本模型。
+    返回结构：
+    [
+        {
+            "id": "models/gemini-1.5-pro-latest",
+            "display_name": "...",
+            "label": "显示名 | models/xxx",
+            "methods": [...]
+        },
+        ...
+    ]
     """
-    last_error = None
-    for model_name in candidate_models:
-        try:
-            gemini_model = genai.GenerativeModel(model_name)
-            response = gemini_model.generate_content(
-                [
-                    "你是一名经验丰富的中文小说编辑和写作教练，"
-                    "擅长帮助作者对稿件进行去AI化、人性化润色，并指出逻辑与设定问题。",
-                    prompt,
-                ],
-                generation_config={
-                    "temperature": float(temperature),
-                    "max_output_tokens": 8192,
-                },
-            )
-            raw_output = response.text  # 预期为 JSON 字符串（由 prompt 约束）
-            if not raw_output:
-                raise RuntimeError(f"模型 {model_name} 返回内容为空。")
-            return raw_output, model_name
+    genai.configure(api_key=api_key)
+    models = []
 
-        except Exception as e:
-            msg = str(e)
-            # 针对“模型不存在 / 不支持”的情况，继续尝试下一个
-            if "404" in msg and ("not found for API version" in msg or "not found" in msg):
-                last_error = e
-                continue
-            # 其他错误（配额、鉴权等）直接抛出
-            last_error = e
-            break
+    all_models = list(genai.list_models())
+    for m in all_models:
+        methods = getattr(m, "supported_generation_methods", []) or []
+        if "generateContent" not in methods:
+            continue
 
-    # 所有候选模型都失败了
-    if last_error:
-        raise last_error
-    raise RuntimeError("未能找到可用的 Gemini 模型。")
+        name = getattr(m, "name", "")
+        display_name = getattr(m, "display_name", "") or name
+        lower_name = name.lower()
+
+        # 排除 embedding / 纯向量模型
+        if "embed" in lower_name or "embedding" in lower_name:
+            continue
+
+        models.append(
+            {
+                "id": name,  # 例如：models/gemini-1.5-pro-latest
+                "display_name": display_name,
+                "label": f"{display_name}  |  {name}",
+                "methods": methods,
+            }
+        )
+
+    # 简单排序：把更适合文本编辑的模型排前面
+    def sort_key(m):
+        n = m["id"]
+        if "gemini-1.5-pro" in n:
+            return (0, n)
+        if "gemini-1.5-flash" in n:
+            return (1, n)
+        if "gemini-1.0-pro" in n or "gemini-pro" in n:
+            return (2, n)
+        return (3, n)
+
+    models.sort(key=sort_key)
+    return models
 
 
-# ============ 侧边栏设置 ============
+def describe_model_for_editing(model_id: str, display_name: str) -> str:
+    """
+    根据模型名给出“适不适合小说审稿/润色”的中文建议说明。
+    """
+    name = (model_id or "").lower()
+
+    if "1.5-pro" in name:
+        return (
+            f"建议：**{display_name}** 综合能力最强，适合长篇小说、复杂人物关系、"
+            "细致逻辑审稿和深度润色。"
+        )
+    if "1.5-flash" in name:
+        return (
+            f"建议：**{display_name}** 适合大量稿件的快速初审、去AI化和基础逻辑检查，"
+            "速度快、成本低，但细腻程度略逊于 pro。"
+        )
+    if "gemini-pro" in name or "1.0-pro" in name:
+        return (
+            f"建议：**{display_name}** 是通用文本模型，适合大部分小说润色与逻辑检查场景，"
+            "性价比较高。"
+        )
+    if "bison" in name:
+        return (
+            f"建议：**{display_name}** 属于上一代模型，能做基础润色和简单逻辑检查，"
+            "更适合作为“初稿清洗”用。"
+        )
+    return (
+        f"建议：**{display_name}** 是可用于 generateContent 的文本模型，"
+        "可以先用一小段稿子试试风格是否符合你的口味。"
+    )
+
+
+# 预先给一些默认值，避免变量未定义
+selected_model_id = None
+selected_model_display_name = ""
+available_models = []
+models_error = None
+
+# ============ 侧边栏设置（含模型探测与选择） ============
 
 with st.sidebar:
     st.header("🔑 Google Gemini 设置")
@@ -126,15 +165,63 @@ with st.sidebar:
         help="你的密钥只在本次会话中使用，不会被写死到代码里。",
     )
 
-    st.header("⚙ 模型与风格")
+    effective_key = resolve_api_key(user_api_key)
 
-    # 这里的选项名字保持不变，但内部会用它来选择候选模型列表
-    model = st.selectbox(
-        "模型档位（内部会自动选择可用的 Gemini 模型）",
-        options=["gpt-4.1-mini", "gpt-4.1"],
-        index=0,
-        help="轻量档优先尝试 gemini-1.5-flash，强力档优先尝试 gemini-1.5-pro，不可用时自动降级。",
-    )
+    if effective_key:
+        # 尝试检测当前 Key 下可用的文本模型
+        try:
+            available_models = get_available_text_models(effective_key)
+        except Exception as e:
+            models_error = str(e)
+            st.error(
+                "检测可用模型时出错：{}\n\n"
+                "请确认：\n"
+                "1. 这个 API Key 是 Google AI Studio 的 key；\n"
+                "2. 已在对应项目中开通 Gemini 相关模型；\n"
+                "3. 如果是 Vertex AI 的 Key，请改用 AI Studio key。".format(e)
+            )
+        else:
+            if available_models:
+                st.subheader("🧠 选择文本模型")
+
+                labels = [m["label"] for m in available_models]
+                selected_label = st.selectbox(
+                    "当前 Key 下可用的文本模型（已过滤掉 embedding 等非文本模型）",
+                    options=labels,
+                    index=0,
+                )
+
+                for m in available_models:
+                    if m["label"] == selected_label:
+                        selected_model_id = m["id"]
+                        selected_model_display_name = m["display_name"]
+                        break
+
+                # 给出这个模型适不适合你现在的“小说审稿/润色”需求
+                if selected_model_id:
+                    st.caption(describe_model_for_editing(selected_model_id, selected_model_display_name))
+
+                # 展开查看所有模型列表
+                with st.expander("查看当前 API Key 下的所有可用文本模型"):
+                    for m in available_models:
+                        st.markdown(
+                            f"- **{m['display_name']}**  \n"
+                            f"  ID: `{m['id']}`  \n"
+                            f"  支持方法: {', '.join(m['methods'])}"
+                        )
+            else:
+                st.warning(
+                    "当前 API Key 下没有任何支持 generateContent 的文本模型。\n\n"
+                    "请前往 Google AI Studio，确认该 Key 关联的项目是否开通了 Gemini。"
+                )
+    else:
+        st.info(
+            "请输入 Gemini API Key（或在环境变量/Secrets 中设置 GOOGLE_API_KEY）后，"
+            "我会自动帮你检测可用的文本模型，并给出适合小说审稿/润色的推荐。"
+        )
+
+    st.markdown("---")
+    st.header("⚙ 风格与功能")
 
     temperature = st.slider(
         "创造力（temperature）",
@@ -155,8 +242,6 @@ with st.sidebar:
         ],
         index=0,
     )
-
-    st.markdown("---")
 
     do_humanize = st.checkbox(
         "进行去AI化润色", value=True,
@@ -289,8 +374,16 @@ def build_user_prompt(
 if run_button:
     if not raw_text.strip():
         st.warning("请先在上方粘贴要处理的小说文本。")
+    elif not selected_model_id:
+        st.error(
+            "当前还没有选定可用的文本模型。\n\n"
+            "请在左侧：\n"
+            "1. 输入有效的 Gemini API Key；\n"
+            "2. 等待自动检测可用模型；\n"
+            "3. 从下拉框中选择一个模型。"
+        )
     else:
-        # 配置 Gemini（使用前端输入的 API Key 或环境变量）
+        # 真正调用前再确保已经配置好 Gemini
         configure_gemini(user_api_key)
 
         with st.spinner("正在使用 Google Gemini 分析与润色文本……"):
@@ -304,19 +397,22 @@ if run_button:
                 target_use=target_use,
             )
 
-            candidate_models = MODEL_CANDIDATES.get(
-                model,
-                ["gemini-1.5-flash", "gemini-pro", "text-bison-001"],
-            )
-
             try:
-                # 自动在候选模型中寻找一个可用的
-                raw_output, used_model = generate_with_fallback(
-                    prompt=user_prompt,
-                    temperature=temperature,
-                    candidate_models=candidate_models,
+                gemini_model = genai.GenerativeModel(selected_model_id)
+
+                response = gemini_model.generate_content(
+                    [
+                        "你是一名经验丰富的中文小说编辑和写作教练，"
+                        "擅长帮助作者对稿件进行去AI化、人性化润色，并指出逻辑与设定问题。",
+                        user_prompt,
+                    ],
+                    generation_config={
+                        "temperature": float(temperature),
+                        "max_output_tokens": 8192,
+                    },
                 )
 
+                raw_output = response.text  # 预期为 JSON 字符串（由 prompt 约束）
                 data = json.loads(raw_output)
 
             except json.JSONDecodeError:
@@ -331,7 +427,7 @@ if run_button:
                 suggestions = data.get("suggestions", "").strip()
 
                 st.markdown("---")
-                st.caption(f"本次实际使用的模型：**{used_model}**")
+                st.caption(f"本次实际使用的模型：**{selected_model_display_name}** (`{selected_model_id}`)")
 
                 st.subheader("✅ 编辑后文本（可再自行微调）")
 
@@ -377,4 +473,4 @@ if run_button:
                     "这样编辑一看就知道“这人真的有在认真写”。"
                 )
 else:
-    st.caption("准备好文本和 API Key 后，点击上方按钮进行分析与润色。")
+    st.caption("准备好文本、API Key 和模型选择后，点击上方按钮进行分析与润色。")
