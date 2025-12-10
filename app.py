@@ -1,171 +1,300 @@
-import streamlit as st
-import openai
 import os
-from datetime import datetime
+import json
+import streamlit as st
+from openai import OpenAI
 
-# --- 页面配置 ---
+# ============ 基本配置 ============
+
 st.set_page_config(
-    page_title="NovelRefiner - 小说去AI化与逻辑质检",
-    page_icon="✍️",
+    page_title="小说去AI化与逻辑润色助手",
+    page_icon="📖",
     layout="wide",
-    initial_sidebar_state="expanded"
 )
 
-# --- 自定义CSS (增加文学质感) ---
-st.markdown("""
-<style>
-    .main {
-        background-color: #f9f9f9;
-    }
-    .stTextArea textarea {
-        font-family: 'Georgia', serif; /* 衬线体更适合阅读小说 */
-        font-size: 16px;
-        line-height: 1.6;
-        color: #333;
-    }
-    .report-box {
-        background-color: #fff;
-        padding: 20px;
-        border-radius: 10px;
-        border-left: 5px solid #ff4b4b;
-        box-shadow: 0 2px 5px rgba(0,0,0,0.05);
-        margin-bottom: 20px;
-    }
-    .rewrite-box {
-        background-color: #fff;
-        padding: 20px;
-        border-radius: 10px;
-        border-left: 5px solid #4CAF50;
-        box-shadow: 0 2px 5px rgba(0,0,0,0.05);
-        font-family: 'Georgia', serif;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-# --- 侧边栏配置 ---
-with st.sidebar:
-    st.header("🛠️ 工作台设置")
-    
-    # API 设置
-    api_key = st.text_input("输入 API Key (OpenAI/DeepSeek)", type="password", help="推荐使用兼容OpenAI格式的API")
-    base_url = st.text_input("API Base URL (可选)", value="https://api.openai.com/v1", help="如果使用DeepSeek或国内中转，请修改此处")
-    model_name = st.selectbox("选择模型", ["gpt-4o", "gpt-4-turbo", "deepseek-chat", "gpt-3.5-turbo"], index=0)
-    
-    st.divider()
-    
-    # 润色参数
-    st.subheader("🎨 润色风格")
-    style_option = st.selectbox(
-        "文风选择",
-        ["海明威式 (简洁有力)", "马尔克斯式 (魔幻细腻)", "金庸式 (侠气流畅)", "纯正网文 (爽点密集)", "写实主义 (沉稳扎实)"]
-    )
-    humanize_level = st.slider("去AI化强度", 1, 5, 3, help="等级越高，对原句结构的打散重组程度越大")
-    
-    st.divider()
-    st.markdown("Designed by **AI Novelist Assistant**")
-
-# --- 核心函数：调用LLM ---
-def call_llm(system_prompt, user_prompt, key, url, model):
-    if not key:
-        st.error("请先在侧边栏输入 API Key 🔑")
-        return None
-    
-    client = openai.OpenAI(api_key=key, base_url=url)
-    
-    try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.7,
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        st.error(f"API 调用出错: {e}")
-        return None
-
-# --- Prompt 设计 (核心资产) ---
-PROMPTS = {
-    "logic_check": """
-    你是一位经验极其丰富、眼光毒辣的小说主编。请对用户提供的文本进行严苛的“逻辑体检”。
-    
-    请重点检查以下问题：
-    1. **事实/常识错误**：例如古代出现手机，或者不符合物理常识的动作。
-    2. **前后矛盾**：前文说A死了，后文A又出现了；或者时间线混乱。
-    3. **人设崩塌**：角色的言行与之前的性格设定严重不符。
-    4. **动机缺失**：角色的行为缺乏合理的心理或环境动因，显得是为了推剧情而强行降智。
-    
-    请输出一份简洁的【体检报告】，列出具体段落和问题所在，不要废话。
-    格式：
-    - [❌ 严重逻辑错误]: ...
-    - [⚠️ 疑似不合理]: ...
-    - [💡 修改建议]: ...
-    """,
-
-    "de_ai": lambda style, level: f"""
-    你是一位顶级小说家，擅长将平庸、僵硬的文字点石成金。你需要对用户提供的AI生成文本进行“彻底重写”。
-    
-    当前目标风格：【{style}】
-    重写强度（1-5）：{level} (5代表可以大幅改动句式，只保留核心剧情)
-    
-    **必须遵守的“去AI化”原则**：
-    1. **禁止AI惯用语**：严禁出现“不得不说”、“作为...”、“这一刻”、“心中涌起一股暖流”、“某种意义上”、“仿佛”等AI高频词。
-    2. **Show, Don't Tell**：不要说“他很生气”，要描写他“眼角的肌肉抽搐了一下，手中的茶杯捏得咯吱作响”。
-    3. **感官细节**：加入气味、触感、光影的描写，增加颗粒感。
-    4. **断句节奏**：打破AI那种匀速的长难句，使用长短句结合，营造呼吸感。
-    5. **拒绝说教**：删除所有试图总结人生道理的升华段落。
-    
-    请直接输出重写后的正文，不需要任何前言后语。
+st.title("📖 小说去AI化与逻辑润色助手")
+st.markdown(
     """
-}
+本工具面向**小说作者/投稿作者**，用于对初稿（包括 AI 生成稿）进行：
 
-# --- 主界面 ---
-st.title("🖊️ 小说去AI化 & 逻辑手术台")
-st.markdown("把AI写的“行活儿”变成真正的**文学作品**。")
+- 去AI化润色：弱化常见 AI 痕迹，让语言更自然、有个性；
+- 逻辑与设定检查：人物动机、世界观、自洽性等问题提示。
 
-col1, col2 = st.columns([1, 1])
+> 请自行确认投稿平台是否允许使用 AI 辅助创作，并对最终稿件负责。
+"""
+)
 
+# ============ OpenAI Client 工具函数 ============
+
+@st.cache_resource
+def get_openai_client():
+    """
+    从 Streamlit secrets 或环境变量中获取 OPENAI_API_KEY。
+    """
+    api_key = None
+    # 优先从 Streamlit secrets 中取
+    if "OPENAI_API_KEY" in st.secrets:
+        api_key = st.secrets["OPENAI_API_KEY"]
+    # 其次从环境变量中取
+    if not api_key:
+        api_key = os.getenv("OPENAI_API_KEY")
+
+    if not api_key:
+        st.error(
+            "未检测到 OPENAI_API_KEY。\n\n"
+            "请在：\n"
+            "1. Streamlit Cloud 的 `Secrets` 中添加 `OPENAI_API_KEY`，或\n"
+            "2. 本地运行时在系统环境变量中设置 `OPENAI_API_KEY`。\n"
+        )
+        st.stop()
+
+    client = OpenAI(api_key=api_key)
+    return client
+
+
+# ============ 侧边栏设置 ============
+
+with st.sidebar:
+    st.header("⚙ 设置")
+
+    model = st.selectbox(
+        "选择模型",
+        options=["gpt-4.1-mini", "gpt-4.1"],
+        index=0,
+        help="gpt-4.1-mini：便宜、够用；gpt-4.1：更强但更贵。",
+    )
+
+    temperature = st.slider(
+        "创造力（temperature）",
+        min_value=0.0,
+        max_value=1.2,
+        value=0.5,
+        step=0.1,
+        help="数值越高，改写越大胆、越有创意。",
+    )
+
+    style_choice = st.selectbox(
+        "风格偏好",
+        options=[
+            "保持原文风格为主",
+            "偏商业流行风（适合杂志/实体出版）",
+            "文学性偏强（语言更讲究）",
+            "网文爽文风（节奏快、爽感强）",
+        ],
+        index=0,
+    )
+
+    st.markdown("---")
+
+    do_humanize = st.checkbox(
+        "进行去AI化润色", value=True,
+        help="减少模板化表达、空洞鸡汤句、过度解释等 AI 痕迹。"
+    )
+    do_logic = st.checkbox(
+        "进行逻辑与世界观检查", value=True,
+        help="包括人物动机、时间线、设定自洽等。"
+    )
+
+    target_use = st.selectbox(
+        "稿件主要用途",
+        options=["杂志/出版社投稿", "网文平台连载", "征文比赛", "个人练笔/自用"],
+        index=0,
+    )
+
+    st.markdown("---")
+    st.caption("提示：长文建议分章节处理，可以更细致。")
+
+
+# ============ 主区域输入 ============
+
+st.subheader("✏ 粘贴你的小说文本")
+
+default_placeholder = (
+    "在这里粘贴你想要处理的小说片段，可以是一个场景、一章或几千字的部分。\n\n"
+    "建议：一次处理 2k~5k 字左右，方便精细修改和检查。"
+)
+
+raw_text = st.text_area(
+    "小说原文",
+    value="",
+    height=320,
+    placeholder=default_placeholder,
+)
+
+st.subheader("🌍 可选：补充设定 / 大纲信息（有助于逻辑检查）")
+extra_info = st.text_area(
+    "世界观、人物背景、大纲要点（可选）",
+    value="",
+    height=150,
+    placeholder="例如：\n"
+    "- 故事发生在近未来赛博朋克城市；\n"
+    "- 男主是卧底警察，表面和黑帮是朋友；\n"
+    "- 女主前期不知道男主身份；\n"
+    "- 第二卷不能出现超自然元素；\n",
+)
+
+col1, col2 = st.columns([1, 2])
 with col1:
-    st.subheader("📄 原稿录入")
-    source_text = st.text_area("在此粘贴AI生成的章节内容...", height=600, placeholder="例：他感到一种前所未有的恐惧，这恐惧如同潮水般将他淹没...")
-    
-    # 两个主要按钮
-    btn_col_1, btn_col_2 = st.columns(2)
-    with btn_col_1:
-        do_logic_check = st.button("🔍 逻辑体检", type="secondary", use_container_width=True)
-    with btn_col_2:
-        do_rewrite = st.button("✨ 去AI化重写", type="primary", use_container_width=True)
-
+    run_button = st.button("🚀 开始分析与润色", type="primary")
 with col2:
-    # 逻辑检查结果区域
-    if do_logic_check and source_text:
-        with st.spinner("正在像拿着显微镜一样检查逻辑漏洞..."):
-            report = call_llm(PROMPTS["logic_check"], source_text, api_key, base_url, model_name)
-            if report:
-                st.subheader("🔍 逻辑体检报告")
-                st.markdown(f'<div class="report-box">{report}</div>', unsafe_allow_html=True)
-    
-    # 重写结果区域
-    if do_rewrite and source_text:
-        with st.spinner(f"正在以【{style_option}】风格重塑文字..."):
-            system_prompt = PROMPTS["de_ai"](style_option, humanize_level)
-            new_text = call_llm(system_prompt, source_text, api_key, base_url, model_name)
-            if new_text:
-                st.subheader("✨ 重写预览")
-                st.markdown(f'<div class="rewrite-box">{new_text}</div>', unsafe_allow_html=True)
-                st.download_button("下载修订稿", new_text, file_name=f"revised_chapter_{datetime.now().strftime('%H%M')}.txt")
+    char_count = len(raw_text)
+    st.write(f"当前字数（含空格）：**{char_count}** 字左右")
 
-# --- 底部说明 ---
-if not source_text:
-    with col2:
-        st.info("👈 请在左侧输入文本以开始工作。")
-        st.markdown("""
-        ### 为什么AI写的小说一眼假？
-        1. **过度解释**：AI总喜欢在动作后解释角色的心理，生怕读者看不懂。
-        2. **滥用形容词**：喜欢堆砌华丽但无效的形容词。
-        3. **逻辑平滑但无聊**：为了安全，AI往往会避免极端的冲突，导致剧情像白开水。
-        
-        **本工具将帮你打破这些桎梏。**
-        """)
+    if char_count > 8000:
+        st.warning("文本较长，可能会略微增加处理成本，建议按章节分段处理。")
+
+
+# ============ 调用 OpenAI 并展示结果 ============
+
+def build_user_prompt(
+    text: str,
+    extra: str,
+    style_choice: str,
+    do_humanize: bool,
+    do_logic: bool,
+    target_use: str,
+) -> str:
+    """
+    将页面上的参数整理成一个清晰的用户指令。
+    """
+    humanize_flag = "是" if do_humanize else "否"
+    logic_flag = "是" if do_logic else "否"
+
+    prompt = f"""
+下面是作者提供的一段小说文本，请你作为**资深中文小说编辑+写作教练**进行专业处理。
+
+【处理目标】：
+1. 在不改变核心情节和人物性格的大前提下，对文本进行适度润色。
+2. 根据需要，弱化常见 AI 写作痕迹，让文字更有“人味”和个人风格。
+3. 如勾选，则检查逻辑和世界观自洽性，指出可能的问题并给出改进建议。
+
+【参数设置】：
+- 去AI化润色：{humanize_flag}
+- 逻辑/设定检查：{logic_flag}
+- 风格偏好：{style_choice}
+- 稿件用途：{target_use}
+
+【如果进行了去AI化润色】：
+- 不要一味删减字数，允许适当扩写细节或内心戏；
+- 避免：套话鸡汤、过度解释、毫无个性的“标准答案”句式；
+- 鼓励：有点棱角的表达、细节描写、符合人物身份的语言；
+- 保持整体叙事视角、人称、时态的一致性。
+
+【如果进行了逻辑/设定检查】：
+- 优先关注以下方面：
+  - 人物行为和台词是否符合其性格和已知信息；
+  - 时间线是否合理，有没有“瞬间移动”“前后矛盾”等问题；
+  - 世界观/设定有没有自相矛盾或突然改变；
+  - 伏笔和信息量是否合适，是否出现“作者知道但角色不可能知道”的情况。
+- 请用简洁明了的条目说明问题，并给出可操作的修改建议。
+
+【原文小说片段】：
+{text}
+
+"""
+
+    if extra.strip():
+        prompt += f"""
+【作者补充的世界观/大纲信息】：
+{extra}
+"""
+    prompt += """
+【输出格式（务必严格返回 JSON）】：
+请严格返回一个 JSON 对象，键包括：
+
+- "edited_text": string，编辑和润色后的完整文本（如果没有勾选去AI化润色，也请对明显错别字/语病做轻微修正即可）。
+- "ai_style_issues": array of string，列出你认为原文中带有“AI写作痕迹”的问题点（如果未勾选去AI化，可填空数组）。
+- "logic_issues": array of string，列出逻辑、设定、自洽性相关的问题和简要说明（如果未勾选逻辑检查，可填空数组）。
+- "suggestions": string，从“作为编辑给作者写反馈”的角度，给出整体写作建议（可以包括节奏、人物塑造、叙事角度等）。
+
+注意：
+- 只输出合法 JSON，不要包含 Markdown 代码块标记或多余说明。
+"""
+    return prompt.strip()
+
+
+if run_button:
+    if not raw_text.strip():
+        st.warning("请先在上方粘贴要处理的小说文本。")
+    else:
+        client = get_openai_client()
+
+        with st.spinner("正在分析与润色文本，请稍候……"):
+
+            user_prompt = build_user_prompt(
+                text=raw_text,
+                extra=extra_info,
+                style_choice=style_choice,
+                do_humanize=do_humanize,
+                do_logic=do_logic,
+                target_use=target_use,
+            )
+
+            try:
+                response = client.responses.create(
+                    model=model,
+                    input=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "你是一名经验丰富的中文小说编辑和写作教练，"
+                                "擅长帮助作者对稿件进行去AI化、人性化润色，并指出逻辑与设定问题。"
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": user_prompt,
+                        },
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=temperature,
+                )
+
+                # 从 Responses API 中取出文本结果
+                raw_output = response.output[0].content[0].text
+
+                data = json.loads(raw_output)
+
+            except Exception as e:
+                st.error(f"调用模型或解析结果时出错：{e}")
+                st.code(str(e))
+            else:
+                edited_text = data.get("edited_text", "").strip()
+                ai_issues = data.get("ai_style_issues", [])
+                logic_issues = data.get("logic_issues", [])
+                suggestions = data.get("suggestions", "").strip()
+
+                st.markdown("---")
+                st.subheader("✅ 编辑后文本（可再自行微调）")
+                st.text_area(
+                    "编辑后文本",
+                    value=edited_text or "（模型未返回编辑后文本）",
+                    height=350,
+                )
+
+                col_a, col_b = st.columns(2)
+
+                with col_a:
+                    st.subheader("🔍 可能的 AI 痕迹")
+                    if ai_issues:
+                        for i, issue in enumerate(ai_issues, start=1):
+                            st.markdown(f"**{i}.** {issue}")
+                    else:
+                        st.write("未返回明显的 AI 痕迹问题（或你未勾选相关功能）。")
+
+                with col_b:
+                    st.subheader("🧠 逻辑 / 设定问题")
+                    if logic_issues:
+                        for i, issue in enumerate(logic_issues, start=1):
+                            st.markdown(f"**{i}.** {issue}")
+                    else:
+                        st.write("未返回明显的逻辑或设定问题（或你未勾选相关功能）。")
+
+                st.subheader("✉ 编辑给作者的总评建议")
+                st.write(suggestions or "（模型未返回整体建议）")
+
+                st.info(
+                    "提示：建议你在此基础上再进行一轮人工修改，逐段朗读，"
+                    "把文字真正改成“你的声音”，这样投稿通过率和编辑好感度都会更高。"
+                )
+else:
+    st.caption("准备好文本后，点击上方按钮进行分析与润色。")
