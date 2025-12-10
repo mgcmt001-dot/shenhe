@@ -26,9 +26,10 @@ st.markdown(
 # ============ Google Gemini 配置工具函数 ============
 
 # 将侧边栏的模型选项映射到 Gemini 的真实模型名
+# 为了兼容你现在的 v1beta 环境，这里统一用 gemini-pro（文本模型）
 MODEL_MAP = {
-    "gpt-4.1-mini": "gemini-1.5-flash",
-    "gpt-4.1": "gemini-1.5-pro",
+    "gpt-4.1-mini": "gemini-pro",
+    "gpt-4.1": "gemini-pro",
 }
 
 
@@ -80,7 +81,7 @@ with st.sidebar:
         "选择模型（内部映射到 Gemini）",
         options=["gpt-4.1-mini", "gpt-4.1"],
         index=0,
-        help="gpt-4.1-mini → gemini-1.5-flash；gpt-4.1 → gemini-1.5-pro。",
+        help="当前环境统一映射为 gemini-pro（文本模型）。",
     )
 
     temperature = st.slider(
@@ -251,12 +252,13 @@ if run_button:
                 target_use=target_use,
             )
 
-            # 将侧边栏选项映射为真正的 Gemini 模型名
-            gemini_model_name = MODEL_MAP.get(model, "gemini-1.5-flash")
+            # 将侧边栏选项映射为真正的 Gemini 模型名（这里统一为 gemini-pro）
+            gemini_model_name = MODEL_MAP.get(model, "gemini-pro")
             gemini_model = genai.GenerativeModel(gemini_model_name)
 
             try:
-                # 使用 JSON 模式，更容易解析
+                # 为兼容旧版本 / v1beta，这里不再使用 response_mime_type JSON 模式，
+                # 而是靠 prompt 约束模型输出 JSON 文本。
                 response = gemini_model.generate_content(
                     [
                         "你是一名经验丰富的中文小说编辑和写作教练，"
@@ -266,7 +268,6 @@ if run_button:
                     generation_config={
                         "temperature": float(temperature),
                         "max_output_tokens": 8192,
-                        "response_mime_type": "application/json",
                     },
                 )
 
