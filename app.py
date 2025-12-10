@@ -338,5 +338,43 @@ if run_button:
                 # 显示润色后文本
                 edited_area = st.text_area(
                     "编辑后文本",
+                    value=edited_text or "（模型未返回编辑后文本）",
+                    height=350,
+                )
 
-            
+                # 下载 TXT 按钮
+                if edited_text:
+                    st.download_button(
+                        label="💾 下载润色后文本（TXT）",
+                        data=edited_text,
+                        file_name="edited_novel.txt",
+                        mime="text/plain",
+                    )
+
+                col_a, col_b = st.columns(2)
+
+                with col_a:
+                    st.subheader("🔍 可能的 AI 痕迹")
+                    if ai_issues:
+                        for i, issue in enumerate(ai_issues, start=1):
+                            st.markdown(f"**{i}.** {issue}")
+                    else:
+                        st.write("未返回明显的 AI 痕迹问题（或你未勾选相关功能）。")
+
+                with col_b:
+                    st.subheader("🧠 逻辑 / 设定问题")
+                    if logic_issues:
+                        for i, issue in enumerate(logic_issues, start=1):
+                            st.markdown(f"**{i}.** {issue}")
+                    else:
+                        st.write("未返回明显的逻辑或设定问题（或你未勾选相关功能）。")
+
+                st.subheader("✉ 编辑给作者的总评建议")
+                st.write(suggestions or "（模型未返回整体建议）")
+
+                st.info(
+                    "建议：再自己通读一遍，把语气和细节改成更符合你个人风格的表达，"
+                    "这样编辑一看就知道“这人真的有在认真写”。"
+                )
+else:
+    st.caption("准备好文本和 API Key 后，点击上方按钮进行分析与润色。")
