@@ -25,25 +25,26 @@ st.markdown(
 
 # ============ OpenAI Client 工具函数 ============
 
-@st.cache_resource
-def get_openai_client():
+def get_openai_client(user_api_key: str):
     """
-    从 Streamlit secrets 或环境变量中获取 OPENAI_API_KEY。
+    优先使用用户在前端输入的 API Key。
+    如未输入，可选择性地回退到环境变量/Streamlit secrets（方便你自己调试）。
     """
     api_key = None
-    # 优先从 Streamlit secrets 中取
-    if "OPENAI_API_KEY" in st.secrets:
-        api_key = st.secrets["OPENAI_API_KEY"]
-    # 其次从环境变量中取
-    if not api_key:
-        api_key = os.getenv("OPENAI_API_KEY")
+
+    if user_api_key and user_api_key.strip():
+        api_key = user_api_key.strip()
+    else:
+        # 你如果不想有任何回退，可以把下面这两行删掉
+        if "OPENAI_API_KEY" in st.secrets:
+            api_key = st.secrets["OPENAI_API_KEY"]
+        if not api_key:
+            api_key = os.getenv("OPENAI_API_KEY")
 
     if not api_key:
         st.error(
-            "未检测到 OPENAI_API_KEY。\n\n"
-            "请在：\n"
-            "1. Streamlit Cloud 的 `Secrets` 中添加 `OPENAI_API_KEY`，或\n"
-            "2. 本地运行时在系统环境变量中设置 `OPENAI_API_KEY`。\n"
+            "未检测到 OpenAI API Key。\n\n"
+            "请在左侧输入你的 OpenAI API Key。"
         )
         st.stop()
 
@@ -54,7 +55,16 @@ def get_openai_client():
 # ============ 侧边栏设置 ============
 
 with st.sidebar:
-    st.header("⚙ 设置")
+    st.header("🔑 OpenAI 设置")
+
+    # 前端输入 API Key（重要修改点）
+    user_api_key = st.text_input(
+        "OpenAI API Key",
+        type="password",
+        help="你的密钥只在本次会话中使用，不会被写死到代码里。",
+    )
+
+    st.header("⚙ 模型与风格")
 
     model = st.selectbox(
         "选择模型",
@@ -143,7 +153,7 @@ with col2:
         st.warning("文本较长，可能会略微增加处理成本，建议按章节分段处理。")
 
 
-# ============ 调用 OpenAI 并展示结果 ============
+# ============ Prompt 构建 ============
 
 def build_user_prompt(
     text: str,
@@ -191,7 +201,6 @@ def build_user_prompt(
 {text}
 
 """
-
     if extra.strip():
         prompt += f"""
 【作者补充的世界观/大纲信息】：
@@ -212,13 +221,16 @@ def build_user_prompt(
     return prompt.strip()
 
 
+# ============ 调用 OpenAI 并展示结果 ============
+
 if run_button:
     if not raw_text.strip():
         st.warning("请先在上方粘贴要处理的小说文本。")
     else:
-        client = get_openai_client()
+        # 这里会优先使用前端输入的 user_api_key
+        client = get_openai_client(user_api_key)
 
-        with st.spinner("正在分析与润色文本，请稍候……"):
+        with st.spinner("正在分析与润色文本……"):
 
             user_prompt = build_user_prompt(
                 text=raw_text,
@@ -265,11 +277,22 @@ if run_button:
 
                 st.markdown("---")
                 st.subheader("✅ 编辑后文本（可再自行微调）")
-                st.text_area(
+                
+                # 显示润色后文本
+                edited_area = st.text_area(
                     "编辑后文本",
                     value=edited_text or "（模型未返回编辑后文本）",
                     height=350,
                 )
+
+                # ===== 新增：下载 TXT 按钮 =====
+                if edited_text:
+                    st.download_button(
+                        label="💾 下载润色后文本（TXT）",
+                        data=edited_text,
+                        file_name="edited_novel.txt",
+                        mime="text/plain",
+                    )
 
                 col_a, col_b = st.columns(2)
 
@@ -293,8 +316,8 @@ if run_button:
                 st.write(suggestions or "（模型未返回整体建议）")
 
                 st.info(
-                    "提示：建议你在此基础上再进行一轮人工修改，逐段朗读，"
-                    "把文字真正改成“你的声音”，这样投稿通过率和编辑好感度都会更高。"
+                    "建议：再自己通读一遍，把语气和细节改成更符合你个人风格的表达，"
+                    "这样编辑一看就知道“这人真的有在认真写”。"
                 )
 else:
-    st.caption("准备好文本后，点击上方按钮进行分析与润色。")
+    st.caption("准备好文本和 API Key 后，点击上方按钮进行分析与润色。")
