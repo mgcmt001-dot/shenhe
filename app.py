@@ -1,356 +1,240 @@
-import os
-import json
 import streamlit as st
 from openai import OpenAI
+import json
 
-# ============ 基本配置 ============
-
+# =============== 基础配置 ===============
 st.set_page_config(
-    page_title="小说去AI化与逻辑润色助手",
-    page_icon="📖",
+    page_title="DeepNovel 文本精修工坊",
     layout="wide",
+    page_icon="🧐"
 )
 
-st.title("📖 小说去AI化与逻辑润色助手")
-st.markdown(
-    """
-本工具面向**小说作者/投稿作者**，用于对初稿（包括 AI 生成稿）进行：
+# =============== Session State 初始化 ===============
+if "input_text" not in st.session_state:
+    st.session_state.input_text = ""
+if "audit_report" not in st.session_state:
+    st.session_state.audit_report = ""
+if "revised_text" not in st.session_state:
+    st.session_state.revised_text = ""
+if "history_logs" not in st.session_state:
+    st.session_state.history_logs = []  # 简单的历史记录
 
-- 去AI化润色：弱化常见 AI 痕迹，让语言更自然、有个性；
-- 逻辑与设定检查：人物动机、世界观、自洽性等问题提示。
-
-> 请自行确认投稿平台是否允许使用 AI 辅助创作，并对最终稿件负责。
-"""
-)
-
-# ============ SiliconFlow 配置 ============
-
-# 给几款常用模型起个「人话名字」方便你选
-SILICONFLOW_MODELS = {
-    "DeepSeek-V2-Chat（中文推理+审稿均衡，推荐）": "deepseek-ai/DeepSeek-V2-Chat",
-    "Qwen2-72B-Instruct（中文文风/润色更强）": "Qwen/Qwen2-72B-Instruct",
-    "GLM-4-9B-Chat（轻量，成本更低，适合初稿清洗）": "THUDM/glm-4-9b-chat",
-}
-
-
-def get_siliconflow_client(user_api_key: str) -> OpenAI:
-    """
-    获取 SiliconFlow 的 OpenAI 兼容客户端：
-    1. 优先使用前端输入的 API Key；
-    2. 然后是 st.secrets["SILICONFLOW_API_KEY"]；
-    3. 然后是环境变量 SILICONFLOW_API_KEY。
-    """
-    api_key = None
-
-    if user_api_key and user_api_key.strip():
-        api_key = user_api_key.strip()
-    else:
-        if "SILICONFLOW_API_KEY" in st.secrets:
-            api_key = st.secrets["SILICONFLOW_API_KEY"]
-        if not api_key:
-            api_key = os.getenv("SILICONFLOW_API_KEY")
-
-    if not api_key:
-        st.error(
-            "未检测到 SiliconFlow API Key。\n\n"
-            "请在左侧输入你的 SiliconFlow API Key，"
-            "或在环境变量/Secrets 中设置 SILICONFLOW_API_KEY。"
-        )
-        st.stop()
-
-    # 使用 OpenAI 官方 SDK，但 base_url 指向 SiliconFlow
-    client = OpenAI(
-        api_key=api_key,
-        base_url="https://api.siliconflow.cn/v1",
-    )
-    return client
-
-
-# ============ 侧边栏设置 ============
-
+# =============== 侧边栏：API 设置 ===============
 with st.sidebar:
-    st.header("🔑 SiliconFlow 设置")
-
-    user_api_key = st.text_input(
-        "SiliconFlow API Key",
-        type="password",
-        help="你的密钥只在本次会话中使用，不会被写死到代码里。",
+    st.title("⚙️ 引擎设置")
+    api_key = st.text_input("SiliconFlow API Key", type="password")
+    if not api_key:
+        st.warning("请输入 API Key 以启动引擎")
+        st.stop()
+    
+    # 初始化客户端
+    client = OpenAI(api_key=api_key, base_url="https://api.siliconflow.cn/v1")
+    
+    st.markdown("---")
+    st.info(
+        "💡 **使用指南**：\n\n"
+        "1. 将写好的章节粘贴到左侧。\n"
+        "2. 选择【审核模式】。\n"
+        "3. AI 会先出报告，再出修改稿。\n"
+        "4. 满意后可直接下载修改稿。"
     )
+    
+    st.markdown("---")
+    if st.button("🗑️ 清空所有内容"):
+        st.session_state.input_text = ""
+        st.session_state.audit_report = ""
+        st.session_state.revised_text = ""
+        st.rerun()
 
-    st.header("🧠 模型选择（基于 SiliconFlow）")
+# =============== AI 调用函数 ===============
+def ask_ai(system_role: str, user_prompt: str, temperature: float = 0.7, model: str = "deepseek-ai/DeepSeek-V3"):
+    """
+    专门针对审核优化的 AI 调用参数，
+    temperature 稍微调低一点（0.7），保证逻辑严谨，不胡乱加戏。
+    """
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_role},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=temperature,
+            max_tokens=4096  # 保证能输出完整修改稿
+        )
+        return resp.choices[0].message.content
+    except Exception as e:
+        st.error(f"API Error: {e}")
+        return None
 
-    model_label = st.selectbox(
-        "选择模型",
-        options=list(SILICONFLOW_MODELS.keys()),
-        index=0,
-        help=(
-            "DeepSeek-V2-Chat：综合能力强，适合审稿+润色；\n"
-            "Qwen2-72B-Instruct：中文文风、润色表现更好；\n"
-            "GLM-4-9B-Chat：更轻量，适合初稿清洗和基础检查。"
-        ),
+# =============== 主界面 ===============
+st.title("🧐 DeepNovel · 文本精修工坊")
+st.caption("资深主编视角 · 逻辑质检 · 去 AI 味 · 文笔润色")
+
+# 布局：左边输入，右边输出
+col_left, col_right = st.columns([1, 1])
+
+with col_left:
+    st.subheader("📝 待审阅原稿")
+    
+    # 粘贴区域
+    input_text = st.text_area(
+        "请粘贴你的章节正文：",
+        height=500,
+        placeholder="在这里粘贴第 X 章的正文...",
+        value=st.session_state.input_text
     )
-    model = SILICONFLOW_MODELS[model_label]
-
-    temperature = st.slider(
-        "创造力（temperature）",
-        min_value=0.0,
-        max_value=1.2,
-        value=0.5,
-        step=0.1,
-        help="数值越高，改写越大胆、越有创意。",
-    )
-
-    style_choice = st.selectbox(
-        "风格偏好",
-        options=[
-            "保持原文风格为主",
-            "偏商业流行风（适合杂志/实体出版）",
-            "文学性偏强（语言更讲究）",
-            "网文爽文风（节奏快、爽感强）",
-        ],
-        index=0,
+    st.session_state.input_text = input_text
+    
+    # 辅助信息（可选）
+    context_info = st.text_area(
+        "背景备注（可选，帮助 AI 理解前因后果）：",
+        height=100,
+        placeholder="例如：主角刚刚重生，这章是他第一次见到反派...",
     )
 
     st.markdown("---")
-
-    do_humanize = st.checkbox(
-        "进行去AI化润色", value=True,
-        help="减少模板化表达、空洞鸡汤句、过度解释等 AI 痕迹。"
+    st.subheader("🔍 选择精修模式")
+    
+    audit_mode = st.radio(
+        "你想怎么修？",
+        [
+            "1. 毒舌逻辑质检（只找茬，不改文）",
+            "2. 去 AI 味 + 沉浸感润色（重点优化文笔）",
+            "3. 全面精修（逻辑修正 + 文笔润色 + 扩充细节）"
+        ]
     )
-    do_logic = st.checkbox(
-        "进行逻辑与世界观检查", value=True,
-        help="包括人物动机、时间线、设定自洽等。"
-    )
+    
+    if st.button("🚀 开始精修任务", use_container_width=True):
+        if not input_text.strip():
+            st.warning("请先粘贴正文！")
+        else:
+            # ================== 模式 1：只找茬 ==================
+            if audit_mode.startswith("1"):
+                with st.spinner("正在用显微镜寻找逻辑漏洞..."):
+                    prompt = f"""
+                    你是一名以“毒舌、严谨”著称的网文主编。请审阅下面这章小说。
+                    
+                    【背景备注】：{context_info}
+                    
+                    【待审正文】：
+                    {input_text}
+                    
+                    请输出一份《审稿报告》，包含：
+                    1. 【逻辑漏洞】：时间线错误、因果不通、战力崩坏等。
+                    2. 【人设 OOC】：人物说话做事是否符合其身份和性格？
+                    3. 【节奏问题】：哪里太水？哪里太赶？
+                    4. 【修改建议】：具体怎么改能救回来。
+                    
+                    注意：不需要重写正文，只需要输出报告。
+                    """
+                    report = ask_ai("资深网文主编", prompt, 0.5)
+                    st.session_state.audit_report = report
+                    st.session_state.revised_text = "" # 此模式无修改稿
+                    st.success("审稿报告已生成！")
 
-    target_use = st.selectbox(
-        "稿件主要用途",
-        options=["杂志/出版社投稿", "网文平台连载", "征文比赛", "个人练笔/自用"],
-        index=0,
-    )
+            # ================== 模式 2：去 AI 味 + 润色 ==================
+            elif audit_mode.startswith("2"):
+                with st.spinner("正在去除 AI 腔调，注入灵魂..."):
+                    # 先不用报告，直接改
+                    prompt = f"""
+                    你是一名金牌网文改稿师，擅长将平淡的文字改成极具画面感和情绪张力的网文。
+                    
+                    【任务目标】：对下面这章正文进行“去 AI 化”润色。
+                    
+                    【原文】：
+                    {input_text}
+                    
+                    【修改要求】：
+                    1. 严禁使用“综上所述”、“总而言之”、“眼中闪过一丝”等陈旧套话。
+                    2. 把“心理说明”改成“动作细节”。（例：不要写“他很生气”，要写“他捏碎了手里的茶杯，滚烫的茶水流过指缝却浑然不觉”。）
+                    3. 增强代入感，多用短句，加快打斗或冲突时的节奏。
+                    4. 保留原剧情走向，只提升表现力。
+                    
+                    请直接输出【润色后的正文】。
+                    """
+                    revised = ask_ai("金牌改稿师", prompt, 0.8)
+                    st.session_state.audit_report = "（此模式直接输出润色稿，无详细报告）"
+                    st.session_state.revised_text = revised
+                    st.success("润色完成！")
 
-    st.markdown("---")
-    st.caption("提示：长文建议分章节处理，可以更细致。")
+            # ================== 模式 3：全面精修 ==================
+            elif audit_mode.startswith("3"):
+                with st.spinner("第一步：正在分析逻辑问题..."):
+                    # Step 1: 先分析
+                    analyze_prompt = f"""
+                    请先找出这章正文的逻辑硬伤和节奏问题。
+                    原文：{input_text[:3000]}...
+                    """
+                    report = ask_ai("资深主编", analyze_prompt, 0.6)
+                    st.session_state.audit_report = report
+                
+                with st.spinner("第二步：根据分析结果重写正文..."):
+                    # Step 2: 再重写
+                    rewrite_prompt = f"""
+                    这是原文：
+                    {input_text}
+                    
+                    这是刚才分析出的问题：
+                    {report}
+                    
+                    请根据以上问题，重写这一章。
+                    要求：
+                    1. 修复所有逻辑漏洞。
+                    2. 极度去 AI 味，拒绝翻译腔和说明文。
+                    3. 在关键情节处增加细节描写（环境、微表情、潜台词）。
+                    4. 字数尽量与原文持平或略多。
+                    
+                    直接输出重写后的正文。
+                    """
+                    revised = ask_ai("大神作家", rewrite_prompt, 0.9)
+                    st.session_state.revised_text = revised
+                    st.success("全面精修完成！")
 
-
-# ============ 主区域输入 ============
-
-st.subheader("✏ 粘贴你的小说文本")
-
-default_placeholder = (
-    "在这里粘贴你想要处理的小说片段，可以是一个场景、一章或几千字的部分。\n\n"
-    "建议：一次处理 2k~5k 字左右，方便精细修改和检查。"
-)
-
-raw_text = st.text_area(
-    "小说原文",
-    value="",
-    height=320,
-    placeholder=default_placeholder,
-)
-
-st.subheader("🌍 可选：补充设定 / 大纲信息（有助于逻辑检查）")
-extra_info = st.text_area(
-    "世界观、人物背景、大纲要点（可选）",
-    value="",
-    height=150,
-    placeholder="例如：\n"
-    "- 故事发生在近未来赛博朋克城市；\n"
-    "- 男主是卧底警察，表面和黑帮是朋友；\n"
-    "- 女主前期不知道男主身份；\n"
-    "- 第二卷不能出现超自然元素；\n",
-)
-
-col1, col2 = st.columns([1, 2])
-with col1:
-    run_button = st.button("🚀 开始分析与润色", type="primary")
-with col2:
-    char_count = len(raw_text)
-    st.write(f"当前字数（含空格）：**{char_count}** 字左右")
-
-    if char_count > 8000:
-        st.warning("文本较长，可能会略微增加处理成本，建议按章节分段处理。")
-
-
-# ============ Prompt 构建 ============
-
-def build_user_prompt(
-    text: str,
-    extra: str,
-    style_choice: str,
-    do_humanize: bool,
-    do_logic: bool,
-    target_use: str,
-) -> str:
-    """
-    将页面上的参数整理成一个清晰的用户指令。
-    """
-    humanize_flag = "是" if do_humanize else "否"
-    logic_flag = "是" if do_logic else "否"
-
-    prompt = f"""
-下面是作者提供的一段小说文本，请你作为**资深中文小说编辑+写作教练**进行专业处理。
-
-【处理目标】：
-1. 在不改变核心情节和人物性格的大前提下，对文本进行适度润色。
-2. 根据需要，弱化常见 AI 写作痕迹，让文字更有“人味”和个人风格。
-3. 如勾选，则检查逻辑和世界观自洽性，指出可能的问题并给出改进建议。
-
-【参数设置】：
-- 去AI化润色：{humanize_flag}
-- 逻辑/设定检查：{logic_flag}
-- 风格偏好：{style_choice}
-- 稿件用途：{target_use}
-
-【如果进行了去AI化润色】：
-- 不要一味删减字数，允许适当扩写细节或内心戏；
-- 避免：套话鸡汤、过度解释、毫无个性的“标准答案”句式；
-- 鼓励：有点棱角的表达、细节描写、符合人物身份的语言；
-- 保持整体叙事视角、人称、时态的一致性。
-
-【如果进行了逻辑/设定检查】：
-- 优先关注以下方面：
-  - 人物行为和台词是否符合其性格和已知信息；
-  - 时间线是否合理，有没有“瞬间移动”“前后矛盾”等问题；
-  - 世界观/设定有没有自相矛盾或突然改变；
-  - 伏笔和信息量是否合适，是否出现“作者知道但角色不可能知道”的情况。
-- 请用简洁明了的条目说明问题，并给出可操作的修改建议。
-
-【原文小说片段】：
-{text}
-
-"""
-    if extra.strip():
-        prompt += f"""
-【作者补充的世界观/大纲信息】：
-{extra}
-"""
-    prompt += """
-【输出格式（务必严格返回 JSON）】：
-请严格返回一个 JSON 对象，键包括：
-
-- "edited_text": string，编辑和润色后的完整文本（如果没有勾选去AI化润色，也请对明显错别字/语病做轻微修正即可）。
-- "ai_style_issues": array of string，列出你认为原文中带有“AI写作痕迹”的问题点（如果未勾选去AI化，可填空数组）。
-- "logic_issues": array of string，列出逻辑、设定、自洽性相关的问题和简要说明（如果未勾选逻辑检查，可填空数组）。
-- "suggestions": string，从“作为编辑给作者写反馈”的角度，给出整体写作建议（可以包括节奏、人物塑造、叙事角度等）。
-
-注意：
-- 只输出合法 JSON，不要包含 Markdown 代码块标记或多余说明。
-"""
-    return prompt.strip()
-
-
-# ============ 调用 SiliconFlow 并展示结果 ============
-
-if run_button:
-    if not raw_text.strip():
-        st.warning("请先在上方粘贴要处理的小说文本。")
-    else:
-        client = get_siliconflow_client(user_api_key)
-
-        with st.spinner("正在使用 SiliconFlow 模型分析与润色文本……"):
-
-            user_prompt = build_user_prompt(
-                text=raw_text,
-                extra=extra_info,
-                style_choice=style_choice,
-                do_humanize=do_humanize,
-                do_logic=do_logic,
-                target_use=target_use,
+with col_right:
+    st.subheader("📋 审阅结果")
+    
+    # Tab 页切换报告和正文
+    tab1, tab2 = st.tabs(["📊 审稿报告", "✍️ 修改后正文"])
+    
+    with tab1:
+        if st.session_state.audit_report:
+            st.markdown(st.session_state.audit_report)
+        else:
+            st.info("暂无报告，请在左侧点击“开始精修”。")
+            
+    with tab2:
+        if st.session_state.revised_text:
+            # 提供编辑框供二次修改
+            final_text = st.text_area(
+                "修改稿（可直接编辑）：",
+                value=st.session_state.revised_text,
+                height=500
             )
+            st.session_state.revised_text = final_text
+            
+            st.markdown("---")
+            # 下载按钮
+            st.download_button(
+                label="📥 下载修改稿 (.txt)",
+                data=final_text,
+                file_name="revised_chapter.txt",
+                mime="text/plain",
+                use_container_width=True
+            )
+        else:
+            st.info("暂无修改稿。")
+            if audit_mode.startswith("1"):
+                st.caption("注：模式 1 仅生成报告，不生成修改稿。")
 
-            try:
-                # 使用 OpenAI 兼容的 chat.completions 接口，不再使用 responses.create
-                response = client.chat.completions.create(
-                    model=model,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": (
-                                "你是一名经验丰富的中文小说编辑和写作教练，"
-                                "擅长帮助作者对稿件进行去AI化、人性化润色，并指出逻辑与设定问题。"
-                            ),
-                        },
-                        {
-                            "role": "user",
-                            "content": user_prompt,
-                        },
-                    ],
-                    temperature=float(temperature),
-                )
-
-                # 对于 SiliconFlow 的大多数聊天模型，content 是一个字符串
-                raw_output = response.choices[0].message.content
-
-                # 尝试解析 JSON
-                data = json.loads(raw_output)
-
-            except json.JSONDecodeError:
-                st.error("模型返回的内容不是合法 JSON，原始输出如下（方便你排查）：")
-                st.code(raw_output)
-            except Exception as e:
-                msg = str(e)
-                # 如果是配额/额度问题，给出更清晰的提示
-                if "insufficient_quota" in msg or "quota" in msg.lower():
-                    st.error(
-                        "SiliconFlow 返回：当前 API Key 可能已没有可用额度或超出限额。\n\n"
-                        "解决方案：\n"
-                        "1. 登录 SiliconFlow 控制台检查用量和套餐；\n"
-                        "2. 如有需要，充值或更换有额度的 API Key；\n"
-                        "3. 然后在左侧更新 API Key 再试。"
-                    )
-                else:
-                    st.error(f"调用 SiliconFlow 模型或解析结果时出错：{e}")
-            else:
-                edited_text = data.get("edited_text", "").strip()
-                ai_issues = data.get("ai_style_issues", [])
-                logic_issues = data.get("logic_issues", [])
-                suggestions = data.get("suggestions", "").strip()
-
-                st.markdown("---")
-                st.caption(f"本次实际使用的模型：**{model_label}** (`{model}`)")
-
-                st.subheader("✅ 编辑后文本（可再自行微调）")
-
-                # 显示润色后文本
-                edited_area = st.text_area(
-                    "编辑后文本",
-                    value=edited_text or "（模型未返回编辑后文本）",
-                    height=350,
-                )
-
-                # 下载 TXT 按钮
-                if edited_text:
-                    st.download_button(
-                        label="💾 下载润色后文本（TXT）",
-                        data=edited_text,
-                        file_name="edited_novel.txt",
-                        mime="text/plain",
-                    )
-
-                col_a, col_b = st.columns(2)
-
-                with col_a:
-                    st.subheader("🔍 可能的 AI 痕迹")
-                    if ai_issues:
-                        for i, issue in enumerate(ai_issues, start=1):
-                            st.markdown(f"**{i}.** {issue}")
-                    else:
-                        st.write("未返回明显的 AI 痕迹问题（或你未勾选相关功能）。")
-
-                with col_b:
-                    st.subheader("🧠 逻辑 / 设定问题")
-                    if logic_issues:
-                        for i, issue in enumerate(logic_issues, start=1):
-                            st.markdown(f"**{i}.** {issue}")
-                    else:
-                        st.write("未返回明显的逻辑或设定问题（或你未勾选相关功能）。")
-
-                st.subheader("✉ 编辑给作者的总评建议")
-                st.write(suggestions or "（模型未返回整体建议）")
-
-                st.info(
-                    "建议：再自己通读一遍，把语气和细节改成更符合你个人风格的表达，"
-                    "这样编辑一看就知道“这人真的有在认真写”。"
-                )
-else:
-    st.caption("准备好文本和 SiliconFlow API Key 后，点击上方按钮进行分析与润色。")
+# =============== 底部小工具 ===============
+st.markdown("---")
+with st.expander("🛠️ 实用小工具：一键提取本章爽点/卖点"):
+    if st.button("✨ 提取卖点"):
+        if not st.session_state.input_text:
+            st.warning("没内容提取得了个寂寞？")
+        else:
+            with st.spinner("提取中..."):
+                p = f"提炼这章的3-5个核心爽点或悬念，用于发朋友圈宣传：\n{st.session_state.input_text[:3000]}"
+                hl = ask_ai("营销鬼才", p, 0.8)
+                st.markdown(hl)
