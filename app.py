@@ -35,7 +35,7 @@ def get_openai_client(user_api_key: str):
     if user_api_key and user_api_key.strip():
         api_key = user_api_key.strip()
     else:
-        # 你如果不想有任何回退，可以把下面这两行删掉
+        # 如果你完全不想有回退，可以把下面这两段删掉
         if "OPENAI_API_KEY" in st.secrets:
             api_key = st.secrets["OPENAI_API_KEY"]
         if not api_key:
@@ -57,7 +57,7 @@ def get_openai_client(user_api_key: str):
 with st.sidebar:
     st.header("🔑 OpenAI 设置")
 
-    # 前端输入 API Key（重要修改点）
+    # 前端输入 API Key
     user_api_key = st.text_input(
         "OpenAI API Key",
         type="password",
@@ -227,7 +227,6 @@ if run_button:
     if not raw_text.strip():
         st.warning("请先在上方粘贴要处理的小说文本。")
     else:
-        # 这里会优先使用前端输入的 user_api_key
         client = get_openai_client(user_api_key)
 
         with st.spinner("正在分析与润色文本……"):
@@ -242,6 +241,7 @@ if run_button:
             )
 
             try:
+                # 去掉 response_format 参数，完全靠 prompt 约束返回 JSON
                 response = client.responses.create(
                     model=model,
                     input=[
@@ -257,18 +257,20 @@ if run_button:
                             "content": user_prompt,
                         },
                     ],
-                    response_format={"type": "json_object"},
                     temperature=temperature,
                 )
 
                 # 从 Responses API 中取出文本结果
                 raw_output = response.output[0].content[0].text
 
+                # 解析 JSON
                 data = json.loads(raw_output)
 
+            except json.JSONDecodeError:
+                st.error("模型返回的内容不是合法 JSON，原始输出如下（方便你排查）：")
+                st.code(raw_output)
             except Exception as e:
                 st.error(f"调用模型或解析结果时出错：{e}")
-                st.code(str(e))
             else:
                 edited_text = data.get("edited_text", "").strip()
                 ai_issues = data.get("ai_style_issues", [])
@@ -285,7 +287,7 @@ if run_button:
                     height=350,
                 )
 
-                # ===== 新增：下载 TXT 按钮 =====
+                # 下载 TXT 按钮
                 if edited_text:
                     st.download_button(
                         label="💾 下载润色后文本（TXT）",
