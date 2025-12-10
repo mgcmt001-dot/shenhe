@@ -1,3 +1,2 @@
-streamlit
-openai
-pandas
+streamlit>=1.38.0
+openai>=1.40.0
