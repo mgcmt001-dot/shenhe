@@ -1,7 +1,7 @@
 import os
 import json
 import streamlit as st
-import google.generativeai as genai
+from openai import OpenAI
 
 # ============ 基本配置 ============
 
@@ -23,205 +23,73 @@ st.markdown(
 """
 )
 
-# ============ 辅助函数：API Key & 模型检测 ============
+# ============ SiliconFlow 配置 ============
 
-def resolve_api_key(user_api_key: str) -> str | None:
+# 给几款常用模型起个「人话名字」方便你选
+SILICONFLOW_MODELS = {
+    "DeepSeek-V2-Chat（中文推理+审稿均衡，推荐）": "deepseek-ai/DeepSeek-V2-Chat",
+    "Qwen2-72B-Instruct（中文文风/润色更强）": "Qwen/Qwen2-72B-Instruct",
+    "GLM-4-9B-Chat（轻量，成本更低，适合初稿清洗）": "THUDM/glm-4-9b-chat",
+}
+
+
+def get_siliconflow_client(user_api_key: str) -> OpenAI:
     """
-    解析当前可用的 API Key：
-    1. 前端输入的 user_api_key 优先；
-    2. 然后是 st.secrets["GOOGLE_API_KEY"]；
-    3. 然后是环境变量 GOOGLE_API_KEY；
-    4. 都没有则返回 None。
+    获取 SiliconFlow 的 OpenAI 兼容客户端：
+    1. 优先使用前端输入的 API Key；
+    2. 然后是 st.secrets["SILICONFLOW_API_KEY"]；
+    3. 然后是环境变量 SILICONFLOW_API_KEY。
     """
+    api_key = None
+
     if user_api_key and user_api_key.strip():
-        return user_api_key.strip()
-    if "GOOGLE_API_KEY" in st.secrets:
-        return st.secrets["GOOGLE_API_KEY"]
-    env_key = os.getenv("GOOGLE_API_KEY")
-    if env_key:
-        return env_key
-    return None
+        api_key = user_api_key.strip()
+    else:
+        if "SILICONFLOW_API_KEY" in st.secrets:
+            api_key = st.secrets["SILICONFLOW_API_KEY"]
+        if not api_key:
+            api_key = os.getenv("SILICONFLOW_API_KEY")
 
-
-def configure_gemini(user_api_key: str):
-    """
-    真正要调用模型前使用，确保一定拿到一个有效 API Key，否则 st.stop()。
-    """
-    api_key = resolve_api_key(user_api_key)
     if not api_key:
         st.error(
-            "未检测到 Google Gemini API Key。\n\n"
-            "请在左侧输入你的 Gemini API Key，或在环境变量/Secrets 中设置 GOOGLE_API_KEY。"
+            "未检测到 SiliconFlow API Key。\n\n"
+            "请在左侧输入你的 SiliconFlow API Key，"
+            "或在环境变量/Secrets 中设置 SILICONFLOW_API_KEY。"
         )
         st.stop()
-    genai.configure(api_key=api_key)
 
-
-@st.cache_data(show_spinner=False)
-def get_available_text_models(api_key: str):
-    """
-    使用给定 api_key 调用 list_models，筛选出：
-    - 支持 generateContent 的模型；
-    - 排除 embedding / vision 等非文本模型。
-    返回结构：
-    [
-        {
-            "id": "models/gemini-1.5-pro-latest",
-            "display_name": "...",
-            "label": "显示名 | models/xxx",
-            "methods": [...]
-        },
-        ...
-    ]
-    """
-    genai.configure(api_key=api_key)
-    models = []
-
-    all_models = list(genai.list_models())
-    for m in all_models:
-        methods = getattr(m, "supported_generation_methods", []) or []
-        if "generateContent" not in methods:
-            continue
-
-        name = getattr(m, "name", "")
-        display_name = getattr(m, "display_name", "") or name
-        lower_name = name.lower()
-
-        # 排除 embedding / 纯向量模型
-        if "embed" in lower_name or "embedding" in lower_name:
-            continue
-
-        models.append(
-            {
-                "id": name,  # 例如：models/gemini-1.5-pro-latest
-                "display_name": display_name,
-                "label": f"{display_name}  |  {name}",
-                "methods": methods,
-            }
-        )
-
-    # 简单排序：把更适合文本编辑的模型排前面
-    def sort_key(m):
-        n = m["id"]
-        if "gemini-1.5-pro" in n:
-            return (0, n)
-        if "gemini-1.5-flash" in n:
-            return (1, n)
-        if "gemini-1.0-pro" in n or "gemini-pro" in n:
-            return (2, n)
-        return (3, n)
-
-    models.sort(key=sort_key)
-    return models
-
-
-def describe_model_for_editing(model_id: str, display_name: str) -> str:
-    """
-    根据模型名给出“适不适合小说审稿/润色”的中文建议说明。
-    """
-    name = (model_id or "").lower()
-
-    if "1.5-pro" in name:
-        return (
-            f"建议：**{display_name}** 综合能力最强，适合长篇小说、复杂人物关系、"
-            "细致逻辑审稿和深度润色。"
-        )
-    if "1.5-flash" in name:
-        return (
-            f"建议：**{display_name}** 适合大量稿件的快速初审、去AI化和基础逻辑检查，"
-            "速度快、成本低，但细腻程度略逊于 pro。"
-        )
-    if "gemini-pro" in name or "1.0-pro" in name:
-        return (
-            f"建议：**{display_name}** 是通用文本模型，适合大部分小说润色与逻辑检查场景，"
-            "性价比较高。"
-        )
-    if "bison" in name:
-        return (
-            f"建议：**{display_name}** 属于上一代模型，能做基础润色和简单逻辑检查，"
-            "更适合作为“初稿清洗”用。"
-        )
-    return (
-        f"建议：**{display_name}** 是可用于 generateContent 的文本模型，"
-        "可以先用一小段稿子试试风格是否符合你的口味。"
+    # 使用 OpenAI 官方 SDK，但 base_url 指向 SiliconFlow
+    client = OpenAI(
+        api_key=api_key,
+        base_url="https://api.siliconflow.cn/v1",
     )
+    return client
 
 
-# 预先给一些默认值，避免变量未定义
-selected_model_id = None
-selected_model_display_name = ""
-available_models = []
-models_error = None
-
-# ============ 侧边栏设置（含模型探测与选择） ============
+# ============ 侧边栏设置 ============
 
 with st.sidebar:
-    st.header("🔑 Google Gemini 设置")
+    st.header("🔑 SiliconFlow 设置")
 
-    # 前端输入 Google API Key
     user_api_key = st.text_input(
-        "Gemini API Key",
+        "SiliconFlow API Key",
         type="password",
         help="你的密钥只在本次会话中使用，不会被写死到代码里。",
     )
 
-    effective_key = resolve_api_key(user_api_key)
+    st.header("🧠 模型选择（基于 SiliconFlow）")
 
-    if effective_key:
-        # 尝试检测当前 Key 下可用的文本模型
-        try:
-            available_models = get_available_text_models(effective_key)
-        except Exception as e:
-            models_error = str(e)
-            st.error(
-                "检测可用模型时出错：{}\n\n"
-                "请确认：\n"
-                "1. 这个 API Key 是 Google AI Studio 的 key；\n"
-                "2. 已在对应项目中开通 Gemini 相关模型；\n"
-                "3. 如果是 Vertex AI 的 Key，请改用 AI Studio key。".format(e)
-            )
-        else:
-            if available_models:
-                st.subheader("🧠 选择文本模型")
-
-                labels = [m["label"] for m in available_models]
-                selected_label = st.selectbox(
-                    "当前 Key 下可用的文本模型（已过滤掉 embedding 等非文本模型）",
-                    options=labels,
-                    index=0,
-                )
-
-                for m in available_models:
-                    if m["label"] == selected_label:
-                        selected_model_id = m["id"]
-                        selected_model_display_name = m["display_name"]
-                        break
-
-                # 给出这个模型适不适合你现在的“小说审稿/润色”需求
-                if selected_model_id:
-                    st.caption(describe_model_for_editing(selected_model_id, selected_model_display_name))
-
-                # 展开查看所有模型列表
-                with st.expander("查看当前 API Key 下的所有可用文本模型"):
-                    for m in available_models:
-                        st.markdown(
-                            f"- **{m['display_name']}**  \n"
-                            f"  ID: `{m['id']}`  \n"
-                            f"  支持方法: {', '.join(m['methods'])}"
-                        )
-            else:
-                st.warning(
-                    "当前 API Key 下没有任何支持 generateContent 的文本模型。\n\n"
-                    "请前往 Google AI Studio，确认该 Key 关联的项目是否开通了 Gemini。"
-                )
-    else:
-        st.info(
-            "请输入 Gemini API Key（或在环境变量/Secrets 中设置 GOOGLE_API_KEY）后，"
-            "我会自动帮你检测可用的文本模型，并给出适合小说审稿/润色的推荐。"
-        )
-
-    st.markdown("---")
-    st.header("⚙ 风格与功能")
+    model_label = st.selectbox(
+        "选择模型",
+        options=list(SILICONFLOW_MODELS.keys()),
+        index=0,
+        help=(
+            "DeepSeek-V2-Chat：综合能力强，适合审稿+润色；\n"
+            "Qwen2-72B-Instruct：中文文风、润色表现更好；\n"
+            "GLM-4-9B-Chat：更轻量，适合初稿清洗和基础检查。"
+        ),
+    )
+    model = SILICONFLOW_MODELS[model_label]
 
     temperature = st.slider(
         "创造力（temperature）",
@@ -242,6 +110,8 @@ with st.sidebar:
         ],
         index=0,
     )
+
+    st.markdown("---")
 
     do_humanize = st.checkbox(
         "进行去AI化润色", value=True,
@@ -369,24 +239,15 @@ def build_user_prompt(
     return prompt.strip()
 
 
-# ============ 调用 Gemini 并展示结果 ============
+# ============ 调用 SiliconFlow 并展示结果 ============
 
 if run_button:
     if not raw_text.strip():
         st.warning("请先在上方粘贴要处理的小说文本。")
-    elif not selected_model_id:
-        st.error(
-            "当前还没有选定可用的文本模型。\n\n"
-            "请在左侧：\n"
-            "1. 输入有效的 Gemini API Key；\n"
-            "2. 等待自动检测可用模型；\n"
-            "3. 从下拉框中选择一个模型。"
-        )
     else:
-        # 真正调用前再确保已经配置好 Gemini
-        configure_gemini(user_api_key)
+        client = get_siliconflow_client(user_api_key)
 
-        with st.spinner("正在使用 Google Gemini 分析与润色文本……"):
+        with st.spinner("正在使用 SiliconFlow 模型分析与润色文本……"):
 
             user_prompt = build_user_prompt(
                 text=raw_text,
@@ -398,28 +259,47 @@ if run_button:
             )
 
             try:
-                gemini_model = genai.GenerativeModel(selected_model_id)
-
-                response = gemini_model.generate_content(
-                    [
-                        "你是一名经验丰富的中文小说编辑和写作教练，"
-                        "擅长帮助作者对稿件进行去AI化、人性化润色，并指出逻辑与设定问题。",
-                        user_prompt,
+                # 使用 OpenAI 兼容的 chat.completions 接口，不再使用 responses.create
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "你是一名经验丰富的中文小说编辑和写作教练，"
+                                "擅长帮助作者对稿件进行去AI化、人性化润色，并指出逻辑与设定问题。"
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": user_prompt,
+                        },
                     ],
-                    generation_config={
-                        "temperature": float(temperature),
-                        "max_output_tokens": 8192,
-                    },
+                    temperature=float(temperature),
                 )
 
-                raw_output = response.text  # 预期为 JSON 字符串（由 prompt 约束）
+                # 对于 SiliconFlow 的大多数聊天模型，content 是一个字符串
+                raw_output = response.choices[0].message.content
+
+                # 尝试解析 JSON
                 data = json.loads(raw_output)
 
             except json.JSONDecodeError:
                 st.error("模型返回的内容不是合法 JSON，原始输出如下（方便你排查）：")
                 st.code(raw_output)
             except Exception as e:
-                st.error(f"调用 Gemini 模型或解析结果时出错：{e}")
+                msg = str(e)
+                # 如果是配额/额度问题，给出更清晰的提示
+                if "insufficient_quota" in msg or "quota" in msg.lower():
+                    st.error(
+                        "SiliconFlow 返回：当前 API Key 可能已没有可用额度或超出限额。\n\n"
+                        "解决方案：\n"
+                        "1. 登录 SiliconFlow 控制台检查用量和套餐；\n"
+                        "2. 如有需要，充值或更换有额度的 API Key；\n"
+                        "3. 然后在左侧更新 API Key 再试。"
+                    )
+                else:
+                    st.error(f"调用 SiliconFlow 模型或解析结果时出错：{e}")
             else:
                 edited_text = data.get("edited_text", "").strip()
                 ai_issues = data.get("ai_style_issues", [])
@@ -427,7 +307,7 @@ if run_button:
                 suggestions = data.get("suggestions", "").strip()
 
                 st.markdown("---")
-                st.caption(f"本次实际使用的模型：**{selected_model_display_name}** (`{selected_model_id}`)")
+                st.caption(f"本次实际使用的模型：**{model_label}** (`{model}`)")
 
                 st.subheader("✅ 编辑后文本（可再自行微调）")
 
@@ -473,4 +353,4 @@ if run_button:
                     "这样编辑一看就知道“这人真的有在认真写”。"
                 )
 else:
-    st.caption("准备好文本、API Key 和模型选择后，点击上方按钮进行分析与润色。")
+    st.caption("准备好文本和 SiliconFlow API Key 后，点击上方按钮进行分析与润色。")
